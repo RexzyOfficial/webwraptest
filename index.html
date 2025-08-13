@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Safe Web Wrapper</title>
+  <meta name="description" content="Web wrapper aman dengan whitelist domain" />
+  <style>
+    :root{
+      --bg:#0b0f14;--card:#0f1720;--muted:#98a0b3;--accent:#9b5cff;--glow:rgba(155,92,255,0.18);--radius:12px;--mono:"Segoe UI",Roboto,Arial,sans-serif;
+    }
+    *{box-sizing:border-box}
+    body{margin:0;font-family:var(--mono);background:var(--bg);color:#fff}
+    header{padding:16px;text-align:center;background:linear-gradient(90deg,#0f1720,#1a1f2b);box-shadow:0 4px 20px var(--glow)}
+    header h1{margin:0;color:var(--accent)}
+    main{display:flex;flex-direction:column;align-items:center;min-height:calc(100vh - 64px);padding:12px}
+    iframe{width:100%;height:80vh;border:none;background:white;border-radius:10px;overflow:hidden}
+    .notice{background:var(--card);padding:8px 12px;border-radius:10px;color:var(--muted);margin-bottom:10px;max-width:1000px;width:100%}
+    .error{display:none;padding:14px;background:linear-gradient(180deg,rgba(255,20,60,0.04),transparent);color:#ffecec;border-radius:10px;margin-top:10px;max-width:1000px;width:100%;}
+    /* admin modal */
+    .modal-backdrop{position:fixed;inset:0;background:rgba(0,0,0,0.6);display:none;align-items:center;justify-content:center;z-index:9999}
+    .modal{background:#07101a;padding:18px;border-radius:12px;max-width:720px;width:95%;box-shadow:0 20px 60px rgba(0,0,0,0.7)}
+    .row{display:flex;gap:8px;align-items:center}
+    input[type="text"],input[type="password"],textarea{width:100%;padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,0.06);background:transparent;color:#fff}
+    button{padding:8px 12px;border-radius:8px;border:1px solid rgba(155,92,255,0.14);background:transparent;color:var(--accent);cursor:pointer}
+    .small{font-size:13px;color:var(--muted)}
+    ul.domain-list{list-style:none;padding:0;margin:8px 0;max-height:180px;overflow:auto}
+    ul.domain-list li{padding:8px;border-radius:8px;background:rgba(255,255,255,0.02);display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
+    .admin-toggle{position:fixed;right:12px;bottom:12px;z-index:999;opacity:0.9}
+    @media(min-width:720px){iframe{height:75vh}}
+  </style>
+</head>
+<body>
+  <header><h1>Safe Web Wrapper</h1></header>
+  <main>
+    <div class="notice" id="notice">Memuat halaman aman...</div>
+    <iframe id="siteFrame" title="Konten web"></iframe>
+    <div class="error" id="errorBox">Tidak dapat memuat konten. Periksa koneksi atau domain.</div>
+  </main>
+
+  <!-- admin quick button (visible always, but admin access still protected) -->
+  <div class="admin-toggle">
+    <a href="?admin=true"><button>Open Admin</button></a>
+  </div>
+
+  <!-- admin modal -->
+  <div class="modal-backdrop" id="adminModal" role="dialog" aria-modal="true">
+    <div class="modal" id="adminContent">
+      <h2 style="margin:0 0 8px">Admin — Edit Whitelist</h2>
+      <p class="small">Masukkan password admin untuk mengedit. Password disimpan aman sebagai environment variable di Vercel.</p>
+
+      <div id="loginSection">
+        <div style="margin:8px 0">
+          <input id="adminPassword" type="password" placeholder="Password admin" />
+        </div>
+        <div class="row" style="margin-top:8px">
+          <button id="loginBtn">Login</button>
+          <div style="flex:1"></div>
+          <button id="closeLogin">Tutup</button>
+        </div>
+      </div>
+
+      <div id="editorSection" style="display:none;margin-top:12px">
+        <p class="small">Daftar domain yang diizinkan (satu per baris, sertakan scheme seperti <code>https://</code>):</p>
+        <textarea id="domainsTextarea" rows="8" style="font-family:monospace"></textarea>
+        <div class="row" style="margin-top:8px">
+          <button id="saveBtn">Simpan ke GitHub</button>
+          <button id="refreshBtn">Refresh</button>
+          <div style="flex:1"></div>
+          <button id="logoutBtn">Logout</button>
+        </div>
+        <p class="small" style="margin-top:8px">Perubahan akan membuat commit di repo <strong>RexzyOfficial/webwraptest</strong> (branch <strong>main</strong>).</p>
+        <div id="saveStatus" class="small" style="margin-top:8px"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const isAdmin = params.get('admin') === 'true';
+    const iframe = document.getElementById('siteFrame');
+    const notice = document.getElementById('notice');
+    const errorBox = document.getElementById('errorBox');
+
+    // ambil url target dari query parameter ?url=...
+    const targetUrl = params.get('url');
+
+    // helper cek origin whitelisting (local check after we fetch whitelist.json)
+    function isWhitelisted(url, whitelist) {
+      try {
+        const origin = new URL(url).origin;
+        return whitelist.some(allowed => origin === new URL(allowed).origin);
+      } catch(e) { return false; }
+    }
+
+    // load whitelist.json (public file in repo root)
+    async function fetchWhitelist() {
+      try {
+        const res = await fetch('/whitelist.json', {cache: "no-store"});
+        if (!res.ok) throw new Error('Gagal memuat whitelist.json');
+        return await res.json();
+      } catch (e) {
+        console.error(e);
+        return null;
+      }
+    }
+
+    async function loadViewer() {
+      const whitelist = await fetchWhitelist();
+      if (!targetUrl) {
+        notice.textContent = "Tidak ada URL yang diberikan. Gunakan ?url=https://example.com";
+        iframe.style.display = "none";
+        return;
+      }
+      if (!whitelist) {
+        notice.textContent = "Gagal memuat whitelist.";
+        iframe.style.display = "none";
+        errorBox.style.display = "block";
+        return;
+      }
+      if (!isWhitelisted(targetUrl, whitelist)) {
+        notice.textContent = "Domain tidak diizinkan: " + targetUrl;
+        iframe.style.display = "none";
+        errorBox.style.display = "block";
+        return;
+      }
+      iframe.src = targetUrl;
+      iframe.onload = () => {
+        notice.textContent = "Halaman dimuat dari: " + targetUrl;
+        errorBox.style.display = "none";
+        iframe.style.display = "block";
+      };
+      setTimeout(() => {
+        // heuristik timeout
+        errorBox.style.display = "block";
+        iframe.style.display = "none";
+      }, 15000);
+    }
+
+    // run viewer
+    loadViewer();
+
+    // ADMIN UI logic
+    const adminModal = document.getElementById('adminModal');
+    const adminPasswordInput = document.getElementById('adminPassword');
+    const loginBtn = document.getElementById('loginBtn');
+    const closeLogin = document.getElementById('closeLogin');
+    const editorSection = document.getElementById('editorSection');
+    const loginSection = document.getElementById('loginSection');
+    const domainsTextarea = document.getElementById('domainsTextarea');
+    const saveBtn = document.getElementById('saveBtn');
+    const refreshBtn = document.getElementById('refreshBtn');
+    const logoutBtn = document.getElementById('logoutBtn');
+    const saveStatus = document.getElementById('saveStatus');
+
+    let adminPassword = null; // disimpan sementara di JS runtime
+
+    function openAdminModal() {
+      adminModal.style.display = 'flex';
+      adminPasswordInput.focus();
+    }
+    function closeAdminModal() {
+      adminModal.style.display = 'none';
+    }
+
+    if (isAdmin) openAdminModal();
+
+    closeLogin.addEventListener('click', closeAdminModal);
+
+    // login hanya menyimpan password di memori — verifikasi sebenarnya dilakukan oleh API saat menyimpan
+    loginBtn.addEventListener('click', async () => {
+      adminPassword = adminPasswordInput.value || '';
+      if (!adminPassword) { alert('Masukkan password'); return; }
+
+      // coba ambil whitelist agar user tahu domain saat login
+      loginSection.style.opacity = '0.6';
+      loginSection.querySelector('button').disabled = true;
+      const wl = await fetchWhitelist();
+      loginSection.style.opacity = '1';
+      loginSection.querySelector('button').disabled = false;
+
+      if (!wl) {
+        alert('Gagal memuat whitelist. Pastikan file whitelist.json ada di repo.');
+        return;
+      }
+      // tampilkan editor
+      domainsTextarea.value = wl.join("\n");
+      loginSection.style.display = 'none';
+      editorSection.style.display = 'block';
+    });
+
+    logoutBtn.addEventListener('click', () => {
+      adminPassword = null;
+      domainsTextarea.value = '';
+      loginSection.style.display = 'block';
+      editorSection.style.display = 'none';
+      adminPasswordInput.value = '';
+    });
+
+    refreshBtn.addEventListener('click', async () => {
+      saveStatus.textContent = 'Memuat ulang whitelist...';
+      const wl = await fetchWhitelist();
+      if (!wl) {
+        saveStatus.textContent = 'Gagal memuat whitelist.';
+        return;
+      }
+      domainsTextarea.value = wl.join("\n");
+      saveStatus.textContent = 'Whitelist di-refresh.';
+      setTimeout(()=>saveStatus.textContent='',2000);
+    });
+
+    saveBtn.addEventListener('click', async () => {
+      const lines = domainsTextarea.value.split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
+      // basic validation
+      for (const u of lines) {
+        try {
+          new URL(u);
+        } catch (e) {
+          alert('URL tidak valid: ' + u + '\nPastikan menulis scheme (https://)');
+          return;
+        }
+      }
+      if (!confirm('Yakin ingin menyimpan perubahan ke GitHub?')) return;
+      saveStatus.textContent = 'Menyimpan...';
+      saveBtn.disabled = true;
+
+      try {
+        const res = await fetch('/api/update-whitelist', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password: adminPassword, whitelist: lines })
+        });
+        const j = await res.json();
+        if (!res.ok) {
+          saveStatus.textContent = 'Gagal: ' + (j.error || JSON.stringify(j));
+        } else {
+          saveStatus.textContent = 'Sukses: whitelist diperbarui. Deploy Vercel mungkin butuh beberapa detik.';
+        }
+      } catch (e) {
+        console.error(e);
+        saveStatus.textContent = 'Kesalahan jaringan saat menyimpan.';
+      } finally {
+        saveBtn.disabled = false;
+        setTimeout(()=>saveStatus.textContent='',4000);
+      }
+    });
+  </script>
+</body>
+</html>
