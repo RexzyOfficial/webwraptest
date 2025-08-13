@@ -1,4 +1,8 @@
 [
   "https://example.com",
-  "https://www.example.com"
+  "https://www.wikipedia.org",
+  "https://news.ycombinator.com",
+  "https://github.com",
+  "https://www.google.com",
+  "https://vercel.com"
 ]
